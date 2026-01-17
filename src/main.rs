@@ -1,5 +1,5 @@
 use std::fs;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Error, Write};
 use std::thread;
 use std::time::Instant;
@@ -65,7 +65,7 @@ fn run_experiment(
     iterations: u64,
     experiment: fn(&[u8], u64, File) -> Result<f64, Error>,
 ) -> Result<f64, Error> {
-    let file = File::create(format!("wal_{}.log", i))?; // make each wal unique
+    let file = OpenOptions::new().create(true).write(true).append(true).open(format!("wal_{}.log", i))?;
     let time = experiment(to_write, iterations, file)?;
     fs::remove_file(format!("wal_{}.log", i))?;
 
@@ -76,7 +76,8 @@ fn thread_work(to_write: &[u8], iterations: u64, mut file: File) -> Result<f64, 
     let start = Instant::now();
     for _ in 0..iterations {
         file.write_all(to_write)?;
-        file.sync_all()?;
+        file.sync_data()?;
+        //file.sync_all()?; sync_all includes all metadata. do we need that?
     }
 
     let end = start.elapsed();
@@ -88,6 +89,7 @@ fn print_aggregates(times: Vec<f64>, throughputs: Vec<f64>, threads: u64) {
     let average_throughput =
         throughputs.clone().into_iter().sum::<f64>() / throughputs.len() as f64;
     let total_writes = average_throughput * threads as f64;
+
     println!("Average time to complete writes: {:.3}", average_time);
     println!(
         "Average throughput of thread: {:.3} writes per second",
