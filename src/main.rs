@@ -1,7 +1,8 @@
+#![allow(dead_code)]
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::io::{Error, Write, BufWriter};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Instant;
 
@@ -11,16 +12,27 @@ const A10: [u8; 10] = [b'a'; 10];
 const A100: [u8; 100] = [b'a'; 100];
 const A1000: [u8; 1000] = [b'a'; 1000];
 
+struct ExperimentConfig {
+    threads: Vec<u64>, 
+    to_write: Vec<&'static [u8]>, 
+    iterations: Vec<u64>,
+    experiment: fn(&[u8], u64, u64) -> Result<f64, Error>,
+}
+
 fn main() {
+    let cores = &core_affinity::get_core_ids().unwrap();
+
     // TESTING THREADS
     println!("---------------");
     println!("testing different thread counts - UNOPTIMZED");
-    let threads = vec![1, 4, 16, 64];
+    let config = ExperimentConfig {
+        threads: vec![1, 4, 16, 64],
+        to_write: vec![&A100, &A100, &A100, &A100],
+        iterations: vec![10_000, 10_000, 10_000, 10_000],
+        experiment: thread_work_unoptimized
+    };
 
-    let to_write: Vec<&'static [u8]> = vec![&A100, &A100, &A100, &A100];
-    let iterations = vec![10_000, 10_000, 10_000, 10_000];
-
-    runner(threads, to_write, iterations, thread_work_unoptimized);
+    runner(config, cores);
 
     println!("---------------");
     //
@@ -28,27 +40,19 @@ fn main() {
     //
     println!("---------------");
     println!("testing different thread counts - BATCHING, size = {}", BATCH_SIZE);
-    let threads = vec![1, 4, 16, 64];
-    let to_write: Vec<&'static [u8]> = vec![&A100, &A100, &A100, &A100];
-    let iterations = vec![10_000, 10_000, 10_000, 10_000];
+    let config = ExperimentConfig {
+        threads: vec![1, 4, 16, 64],
+        to_write: vec![&A100, &A100, &A100, &A100],
+        iterations: vec![10_000, 10_000, 10_000, 10_000],
+        experiment: thread_work_batching
+    };
 
-    runner(threads, to_write, iterations, thread_work_batching);
+    runner(config, cores);
 
     println!("---------------");
     //
     
     /*
-    println!("---------------");
-    println!("testing different thread counts - WITH BATCHING");
-    let threads = vec![1, 2, 4, 16, 64];
-    let to_write: Vec<&'static [u8]> = vec![b"a", b"a", b"a", b"a", b"a"];
-    let iterations = vec![15_000, 15_000, 15_000, 15_000, 15_000];
-
-    runner(threads, to_write, iterations, thread_work_batching);
-
-    println!("---------------");
-    //
-
     println!("---------------");
     println!("testing different thread counts - FLAGS");
     let threads = vec![1, 2, 4, 16, 64];
@@ -89,39 +93,37 @@ fn main() {
     */
 }
 
-fn runner(threads: Vec<u64>, to_write: Vec<&'static [u8]>, iterations: Vec<u64>, experiment: fn(&[u8], u64, u64) -> Result<f64, Error>) {
-    for i in 0..threads.len() {
-        let mut handles = Vec::with_capacity(threads[i] as usize);
-        let writing = to_write[i];
-        let iteration = iterations[i];
-            
+fn runner(config: ExperimentConfig, cores: &Vec<core_affinity::CoreId>) {
+    for ((&n_threads, &writing), &iteration) in config.threads.iter().zip(&config.to_write).zip(&config.iterations) {
         let start = Instant::now();
-        for t in 0..threads[i] {
-            handles.push(thread::spawn(move || {
-                run_experiment(t, writing, iteration, experiment)
-            }));
-        }
+        let barrier = Barrier::new(n_threads as usize);
 
-        let mut times = vec![];
-        for handle in handles {
-            let time = handle.join().unwrap().unwrap_or_else(|e| panic!("{}", e));
-            times.push(time);
-        }
+        let times: Vec<f64> = thread::scope(|s| {
+            let mut handles = Vec::with_capacity(n_threads as usize);
+
+            for t in 0..n_threads {
+                let barrier = &barrier;
+                handles.push(s.spawn(move || {
+                    let core = cores[(t as usize) % cores.len()];
+                    let res = core_affinity::set_for_current(core);
+                    if !res {
+                        panic!("cannot pin thread");
+                    }
+
+                    barrier.wait();
+                    (config.experiment)(writing, iteration, t)
+                }));
+            }
+
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("thread panicked").expect("experiment failed"))
+                .collect()
+        });
 
         let elapsed = start.elapsed().as_secs_f64();
-        print_aggregates(times, threads[i], iterations[i], elapsed);
-    }
-}
-
-fn run_experiment(
-    i: u64,
-    to_write: &[u8],
-    iterations: u64,
-    experiment: fn(&[u8], u64, u64) -> Result<f64, Error>,
-) -> Result<f64, Error> {
-    let time = experiment(to_write, iterations, i)?;
-
-    Ok(time)
+        print_aggregates(times, n_threads, iteration, elapsed);
+    } 
 }
 
 fn thread_work_unoptimized(to_write: &[u8], iterations: u64, i: u64) -> Result<f64, Error> {
@@ -154,6 +156,7 @@ fn thread_work_batching(to_write: &[u8], iterations: u64, i: u64) -> Result<f64,
     Ok(end.as_secs_f64())
 }
 
+// not working - getting invalid argument - probl need to align writes or something
 fn thread_work_flags(to_write: &[u8], iterations: u64, i: u64) -> Result<f64, Error> {
     let mut file = OpenOptions::new()
                     .create(true)
@@ -175,7 +178,7 @@ fn thread_work_bufwriter(to_write: &[u8], iterations: u64, i: u64) -> Result<f64
     let mut writer = BufWriter::new(file);
     let start = Instant::now();
     for iter_num in 0..iterations {
-        writer.write_all(to_write);
+        writer.write_all(to_write)?;
         if (iter_num + 1) % BATCH_SIZE == 0 {
             writer.flush()?;
             writer.get_ref().sync_data()?;
@@ -262,7 +265,6 @@ fn print_aggregates(times: Vec<f64>, threads: u64, iterations: u64, elapsed: f64
     let avg_thread_time = times.iter().sum::<f64>() / times.len() as f64;
     let total_writes = (threads as f64) * (iterations as f64);
     let writes_per_sec = total_writes / elapsed;
-    let slowest_thread = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
     println!(
         "threads: {:>} | writes to complete: {:>} | average time for thread to complete: {:>6.3} | writes per second {:>6.3}",
