@@ -19,6 +19,8 @@ struct ExperimentConfig {
     experiment: fn(&[u8], u64, u64) -> Result<f64, Error>,
 }
 
+// NOTE: Run program with `cargo build --release && sudo target/release/wal-bench`
+
 fn main() {
     let cores = &core_affinity::get_core_ids().unwrap();
 
@@ -109,6 +111,13 @@ fn runner(config: ExperimentConfig, cores: &Vec<core_affinity::CoreId>) {
                     if !res {
                         panic!("cannot pin thread");
                     }
+
+                    // drop kernel level page cache entries
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .open("/proc/sys/vm/drop_caches")?;
+
+                    file.write_all(b"3\n")?;
 
                     barrier.wait();
                     (config.experiment)(writing, iteration, t)
