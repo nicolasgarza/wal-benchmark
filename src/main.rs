@@ -7,10 +7,13 @@ use std::thread;
 use std::time::Instant;
 
 const BATCH_SIZE: u64 = 10;
+const BLOCK_SIZE: usize = 512;
 const A1: [u8; 1] = [b'a'; 1];
 const A10: [u8; 10] = [b'a'; 10];
 const A100: [u8; 100] = [b'a'; 100];
 const A1000: [u8; 1000] = [b'a'; 1000];
+const ABLOCK: [u8; BLOCK_SIZE] = [b'a'; BLOCK_SIZE];
+
 
 struct ExperimentConfig {
     threads: Vec<u64>, 
@@ -53,6 +56,31 @@ fn main() {
 
     println!("---------------");
     //
+
+    println!("---------------");
+    println!("testing different thread counts, writing by block size.");
+
+    let config = ExperimentConfig {
+        threads: vec![1, 4, 16, 64],
+        to_write: vec![&ABLOCK, &ABLOCK, &ABLOCK, &ABLOCK],
+        iterations: vec![10_000, 10_000, 10_000, 10_000],
+        experiment: thread_work_unoptimized
+    };
+
+    runner(config, cores);
+
+    // 
+    println!("---------------");
+    println!("testing different thread counts, writing by block size - BATCHING");
+
+    let config = ExperimentConfig {
+        threads: vec![1, 4, 16, 64],
+        to_write: vec![&ABLOCK, &ABLOCK, &ABLOCK, &ABLOCK],
+        iterations: vec![10_000, 10_000, 10_000, 10_000],
+        experiment: thread_work_batching
+    };
+    
+    runner(config, cores);
     
     /*
     println!("---------------");
@@ -94,6 +122,7 @@ fn main() {
 
     */
 }
+
 
 fn runner(config: ExperimentConfig, cores: &Vec<core_affinity::CoreId>) {
     for ((&n_threads, &writing), &iteration) in config.threads.iter().zip(&config.to_write).zip(&config.iterations) {
